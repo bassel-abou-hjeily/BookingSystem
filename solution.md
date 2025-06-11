@@ -1,128 +1,112 @@
-Tick'it Booking System – Seat Locking & Conflict Resolution
+# Tick'it Booking System – Seat Locking & Conflict Resolution
 
-Problem Summary
+## Problem Summary
 
-The booking system allowed multiple users to reserve and pay for the same seats concurrently, resulting in double booking. This happened because there was no mechanism to lock selected seats during the checkout process, leaving a time window where seats were still marked as available.
+The booking system allowed multiple users to reserve and pay for the same seats at the same time, causing double bookings. This happened because there was no locking mechanism to temporarily hold seats during checkout.
 
-Goals of the Solution
+## Goals of the Solution
 
-Prevent multiple users from selecting or booking the same seats at the same time.
+- Prevent multiple users from selecting or booking the same seats simultaneously.
+- Temporarily lock seats during the checkout process.
+- Automatically release locks after timeout or if the user cancels.
+- Ensure atomic and consistent seat reservation.
 
-Implement a temporary locking mechanism for seats during checkout.
+---
 
-Auto-release locks after a timeout or upon checkout abandonment.
+## Solution Overview
 
-Ensure atomicity and consistency in the booking process.
+### 1. **Seat Locking Mechanism**
 
-Solution Overview
+A new collection `SeatLocks` is introduced:
 
-1. Seat Locking Mechanism
-
-A new collection SeatLocks is introduced with the following schema:
-
+```ts
 SeatLock {
   _id: ObjectId,
-  seatID: string,
-  eventID: string,
-  customerID: string,
+  lockID: string,
+  seatIDs: ObjectId[],
+  eventID: ObjectId,
+  customerID: ObjectId,
   lockedAt: Date,
   expiresAt: Date
 }
+```
 
-When a user selects seats for checkout, the system locks the seats for a limited time (e.g., 15 minutes).
+- When a user selects seats, the system locks them for a limited time (e.g., 5 minutes).
+- Locked seats are excluded from seat availability.
+- Locks are released when:
+  - The user completes booking.
+  - The user cancels selection.
+  - The lock expires.
 
-Locked seats are excluded from availability in the seat selection API.
+### 2. **Updated APIs**
 
-Lock is released when:
+#### `GET /api/events/:eventID/seats`
 
-The customer completes checkout (seat becomes officially booked).
+- Returns all seats of the event with their status:
+  - `available`: seat is not taken or locked
+  - `locked`: seat is temporarily locked
+  - `taken`: seat is officially booked
 
-The lock expires.
+#### `POST /api/events/:eventID/lock-seats`
 
-The customer cancels the process.
+- Input: `seatIDs[]`, `customerID`
+- Locks seats for the customer if not already taken or locked.
+- Fails if any seat is already taken or currently locked.
 
-2. Updated APIs
+#### `POST /api/events/:eventID/unlock-seats`
 
-GET /api/events/:eventID/seats
+- Input: `seatIDsToUnlock[]`, `customerID`
+- Unlocks specific seats locked by the customer.
+- Deletes the lock if all seats are removed.
 
-Now filters out seats that are:
+### 3. **Lock Expiration Handling**
 
-Marked as isTaken = true
+- Expired seat locks are auto-removed by a background task or TTL index.
+- Ensures seats return to the pool if not booked.
 
-Or currently locked and lock is not expired
+---
 
-POST /api/events/:eventID/lock-seats
+## How It Solves the Problem
 
-Input: seatIDs: string[]
+- Only one customer can lock a seat at any time.
+- Prevents race conditions by ensuring locked seats are excluded.
+- Frees up seats if the user does not proceed to payment.
 
-Checks if requested seats are already taken or locked
+---
 
-If available, creates locks with expiration timestamp
+## Real-World Scenario
 
-POST /api/events/:eventID/confirm-booking
+1. Customer X selects A2, A3 → Locks created.
+2. Customer Y tries A2 → Marked as locked.
+3. Customer X pays → Seats marked as taken, locks removed.
+4. Customer X cancels or time expires → Locks removed, seats available again.
 
-Input: seatIDs, orderID, etc.
+---
 
-Checks that the seats are still locked by the customer
+## Database Models Summary
 
-Marks seats as taken and creates a reservation
+### SeatLocks Collection
 
-Deletes corresponding locks
+| Field      | Type       | Description                 |
+| ---------- | ---------- | --------------------------- |
+| lockID     | String     | Unique lock identifier      |
+| seatIDs    | ObjectId[] | List of locked seats        |
+| eventID    | ObjectId   | Associated event            |
+| customerID | ObjectId   | Customer who locked seats   |
+| lockedAt   | Date       | Time when seats were locked |
+| expiresAt  | Date       | Lock expiration time        |
 
-3. Lock Expiration Handling
+### Seats Collection
 
-A background job or middleware checks and clears expired seat locks regularly (e.g., every minute).
+- `isTaken`: boolean — true if seat is officially booked.
+- Availability now also depends on whether the seat is locked.
 
-Locks older than the expiration window are removed, making the seats available again.
+---
 
-How It Solves the Problem
+## Final Notes
 
-Ensures that only one customer can lock a seat at a time.
-
-Makes concurrent selection and booking of the same seat impossible.
-
-Prevents abuse by auto-releasing locks that are not followed by a payment.
-
-Makes the seat booking system race-condition proof by leveraging atomic operations.
-
-Real-World Scenario
-
-Customer X selects A2, A3 → SeatLocks created for these.
-
-Customer Y tries to select A2 → SeatLock check fails, seat marked as temporarily unavailable.
-
-Customer X pays and confirms booking → Seats marked as taken, SeatLocks deleted.
-
-If Customer X abandons payment → SeatLocks expire, seats return to pool.
-
-Database Models Summary
-
-New Collection
-
-SeatLocks
-
-Field    Type   Description
-
-seatID   String  Seat being locked
-
-eventID  String  Event identifier
-
-customerID String Who locked the seat
-
-lockedAt Date When it was locked
-
-expiresAt Date When it will auto-release
-
-Modified Collection
-Seats
-
-Added: isTaken boolean remains unchanged but availability now also depends on lock status.
-
-Final Notes
-
-This design is scalable and easily supports distributed deployments.
-
-For production, ensure seat locks are created with atomic DB operations and consider TTL indexes on the SeatLocks collection.
-
-This structure also enables future features like seat selection expiration countdown for the user.
+- Atomic operations and DB sessions ensure race conditions are avoided.
+- TTL indexes can be used for auto-expiring seat locks.
+- Unlock API allows partial seat cancellation before booking confirmation.
+- Supports scalability and future features like countdown timers for seat hold duration.
 
